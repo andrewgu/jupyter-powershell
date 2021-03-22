@@ -5,6 +5,38 @@ except ImportError:
     import Queue as queue
 from threading import Timer, Lock
 from time import sleep
+import re
+
+KNOWN_RARE_PROMPT = "#37163957523#"
+
+# "PS " followed by a path-like thing followed by the > symbol is default powershell, also default Torus DMS suffix
+PS_DEFAULT_PROMPT_RE = re.compile(r"PS (?:.*?)\>$")
+
+# DMS default behavior, captures the preamble that DMS tends to print.
+DMS_DEFAULT_PROMPT_RE = re.compile(r"\[(?:MultiTenant|Itar|Gallatin|BlackForest)\\\w+(?:\\[\w\.\-]*?)\](?:\s*?)PS (?:.*?)\>$")
+
+# Returns tuple (bool, string) for whether there's a prompt in there, and then string content with prompt removed.
+def match_prompt(text):
+    dms_match = DMS_DEFAULT_PROMPT_RE.match(text)
+    if dms_match != None:
+        # Matched DMS prompt
+        spliced = text[:dms_match.pos] + text[dms_match.endpos:]
+        return (True, spliced)
+    
+    default_match = PS_DEFAULT_PROMPT_RE.match(text)
+    if default_match != None:
+        spliced = text[:default_match.pos] + text[default_match.endpos:]
+        return (True, spliced)
+
+    # Fallback match
+    if text.contains(KNOWN_RARE_PROMPT):
+        pos = text.rfind(KNOWN_RARE_PROMPT)
+        end = pos + len(KNOWN_RARE_PROMPT)
+        spliced = text[:pos] + text[end:]
+        return (True, spliced)
+
+    # No match
+    return (False, text)
 
 class ReplReader(threading.Thread):
     def __init__(self, repl):
@@ -41,7 +73,7 @@ class ReplProxy(object):
 
         # Returns a generator that yields string messages as they are returned from powershell via stdout
         # this is a hack to detect when we stop processing this input
-        for temp in self.run_command('function prompt() {"^"}'):
+        for temp in self.run_command('function prompt() {"' + KNOWN_RARE_PROMPT + '"}'):
             continue
         
     def run_command(self, input):
@@ -99,11 +131,16 @@ class ReplProxy(object):
             self.write("\n***Repl Killed***\n""")
 
     def write(self, packet):
-        # this is a hack to detect when we stop processing this input
-        if packet.endswith('^'):
+        # Slightly more resilient hack to check whether this is the line that ends the prompt.
+        # This is hacking specifically tuned for the powershell code being run, since whatever
+        # messes with the prompt would cause issues.
+        output_window = self.output + packet
+        ends_with_prompt, output_without_prompt = match_prompt(output_window)
+        if ends_with_prompt:
             self.stop_flag = True
-            self.output += packet[:-1]
+            self.output += output_without_prompt
             return
+        
         self.output += packet
 
         if not self.output_prefix_stripped and len(self.output) >= self.expected_output_len:
